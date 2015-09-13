@@ -23,20 +23,19 @@ var url = require('url')
 var util = require('util')
 var which = require('which')
 
-var cdnUrl = process.env.PHANTOMJS_CDNURL || 'https://github.com/bprodoehl/phantomjs/releases/download/'
-var downloadUrl = cdnUrl + helper.version + '/phantomjs-' + helper.version + '-'
-
 var originalPath = process.env.PATH
 
 // If the process exits without going through exit(), then we did not complete.
 var validExit = false
 
+/*
 process.on('exit', function () {
   if (!validExit) {
     console.log('Install exited unexpectedly')
     exit(1)
   }
 })
+*/
 
 // NPM adds bin directories to the path, which will cause `which` to find the
 // bin for this package not the actual phantomjs bin.  Also help out people who
@@ -103,29 +102,26 @@ whichDeferred.promise
   })
   .then(function (conf) {
     tmpPath = findSuitableTempDirectory(conf)
+    var deferred = kew.defer()
 
-    // Can't use a global version so start a download.
-    if (process.platform === 'linux' && process.arch === 'x64') {
-      downloadUrl += 'linux-x86_64.zip'
-    } else if (process.platform === 'darwin' || process.platform === 'openbsd' || process.platform === 'freebsd') {
-      downloadUrl += 'macosx.zip'
-    } else {
-      console.error('Unexpected platform or architecture:', process.platform, process.arch)
-      exit(1)
-    }
+    getDownloadUrl().then(function(downloadUrl) {
+      var fileName = downloadUrl.split('/').pop()
+      var downloadedFile = path.join(tmpPath, fileName)
 
-    var fileName = downloadUrl.split('/').pop()
-    var downloadedFile = path.join(tmpPath, fileName)
+      // Start the install.
+      if (!fs.existsSync(downloadedFile)) {
+        console.log('Downloading', downloadUrl)
+        console.log('Saving to', downloadedFile)
+        requestBinary(getRequestOptions(conf, downloadUrl), downloadedFile).then(function() {
+          deferred.resolve(downloadedFile)
+        })
+      } else {
+        console.log('Download already available at', downloadedFile)
+        deferred.resolve(downloadedFile)
+      }
+    })
 
-    // Start the install.
-    if (!fs.existsSync(downloadedFile)) {
-      console.log('Downloading', downloadUrl)
-      console.log('Saving to', downloadedFile)
-      return requestBinary(getRequestOptions(conf), downloadedFile)
-    } else {
-      console.log('Download already available at', downloadedFile)
-      return downloadedFile
-    }
+    return deferred.promise
   })
   .then(function (downloadedFile) {
     return extractDownload(downloadedFile)
@@ -200,7 +196,7 @@ function findSuitableTempDirectory(npmConf) {
 }
 
 
-function getRequestOptions(conf) {
+function getRequestOptions(conf, downloadUrl) {
   var options = {
     uri: downloadUrl,
     encoding: null, // Get response as a buffer
@@ -284,6 +280,7 @@ function requestBinary(requestOptions, filePath) {
 
 function extractDownload(filePath) {
   var deferred = kew.defer()
+
   // extract to a unique directory in case multiple processes are
   // installing and extracting at once
   var extractedPath = filePath + '-extract-' + Date.now()
@@ -321,6 +318,55 @@ function extractDownload(filePath) {
 }
 
 
+function isLinux() {
+  return process.platform === 'linux' && process.arch === 'x64'
+}
+
+
+function isMacOX() {
+  return process.platform === 'darwin' || process.platform === 'openbsd' || process.platform === 'freebsd'
+}
+
+
+function getDownloadUrl() {
+
+  // Can't use a global version so start a download.
+  if (isLinux()) {
+    var deferred = kew.defer()
+
+    cp.execFile('/usr/bin/lsb_release', ['-a'], { cwd: __dirname }, function(err, stdout, stderr) {
+      var cdnUrl = 'https://github.com/bprodoehl/phantomjs/releases/download/'
+      var downloadUrl = cdnUrl + 'v' + helper.version + '/phantomjs-' + helper.version + '-'
+
+      var match = new RegExp(/Release:\s+([0-9\.]+)/).exec(stdout)
+      var version = match[1]
+      switch (version) {
+        case '14.04':
+          deferred.resolve(downloadUrl + 'u1404-x86_64.zip')
+          return
+        case '15.04':
+          deferred.resolve(downloadUrl + 'u1504-x86_64.zip')
+          return
+        default:
+          console.error('Unsupported version of Linux - defaulting to 14.04 (likely will not work!)')
+          deferred.resolve(downloadUrl + 'u1404-x86_64.zip')
+          return
+      }
+
+      return deferred.promise
+    })
+    return deferred.promise
+  } else if (isMacOX()) {
+    console.error('Using phantomjs2 Preview (2014016)');
+
+    return kew.resolve('https://github.com/bprodoehl/phantomjs/releases/download/2.0.0-20141016/phantomjs-2.0.0-20141016-macosx.zip')
+  } else {
+    console.error('Unexpected platform or architecture:', process.platform, process.arch)
+    exit(1)
+  }
+}
+
+
 function copyIntoPlace(extractedPath, targetPath) {
   console.log('Removing', targetPath)
   return kew.nfcall(rimraf, targetPath).then(function () {
@@ -328,7 +374,7 @@ function copyIntoPlace(extractedPath, targetPath) {
     var files = fs.readdirSync(extractedPath)
     for (var i = 0; i < files.length; i++) {
       var file = path.join(extractedPath, files[i])
-      if (fs.statSync(file).isDirectory() && file.indexOf(helper.version) != -1) {
+      if (fs.statSync(file).isDirectory() && (!isLinux() || file.indexOf(helper.version) != -1)) {
         console.log('Copying extracted folder', file, '->', targetPath)
         return kew.nfcall(ncp, file, targetPath)
       }
